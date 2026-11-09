@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import requests, re, time, statistics
 
 ROOT=Path(__file__).parent
-app=FastAPI(title="股票估值助手",version="2.3.0")
+app=FastAPI(title="股票估值助手",version="2.4.0")
 S=requests.Session()
 S.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36","Referer":"https://quote.eastmoney.com/"})
 CACHE={}
@@ -57,11 +57,11 @@ def get_quote(code):
     return {"code":code,"name":d.get("f58") or "","price":n(d.get("f43")),"pe_ttm":n(d.get("f164")),"pe_dynamic":n(d.get("f162")),"pb":n(d.get("f167")),"roe":n(d.get("f173")),"market_cap":n(d.get("f116")),"change_pct":n(d.get("f170"))}
 
 def get_history(code):
-    # AkShare's current interface is stock_a_lg_indicator(stock=...), not stock_a_indicator_lg(symbol=...).
+    # AkShare's current interface is stock_a_indicator_lg(symbol=...), not stock_a_indicator_lg(symbol=...).
     # Its trade_date is commonly the DataFrame index; normalize it before calculating windows.
     try:
         import akshare as ak
-        df=ak.stock_a_lg_indicator(stock=code)
+        df=ak.stock_a_indicator_lg(symbol=code)
         if df is None or len(df)==0: return None
         # Normalize tabular output and older versions with trade_date in the index.
         if "trade_date" not in [str(x).strip().lower() for x in df.columns] and getattr(df.index,"name",None):
