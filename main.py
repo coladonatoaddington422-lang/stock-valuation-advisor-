@@ -104,52 +104,62 @@ def hist_summary(history,metric,current):
     for period in ("3y","5y"):
         vals=[x.get(metric) for x in history.get(period,[])]
         valid=[x for x in vals if x is not None and x>0]
-        out[period]={"count":len(valid),"percentile":percentile(valid,current),"q20":round(quantile(valid,.2),3) if quantile(valid,.2) is not None else None,"median":round(quantile(valid,.5),3) if quantile(valid,.5) is not None else None,"q80":round(quantile(valid,.8),3) if quantile(valid,.8) is not None else None}
+        out[period]={"count":len(valid),"percentile":percentile(valid,current),"q10":round(quantile(valid,.1),3) if quantile(valid,.1) is not None else None,"q20":round(quantile(valid,.2),3) if quantile(valid,.2) is not None else None,"q40":round(quantile(valid,.4),3) if quantile(valid,.4) is not None else None,"median":round(quantile(valid,.5),3) if quantile(valid,.5) is not None else None,"q60":round(quantile(valid,.6),3) if quantile(valid,.6) is not None else None,"q80":round(quantile(valid,.8),3) if quantile(valid,.8) is not None else None}
     return out
 
 def make_valuation(q,kind,history):
     price=q["price"]; pe=q["pe_ttm"]; pb=q["pb"]
     pe_h=hist_summary(history,"pe",pe); pb_h=hist_summary(history,"pb",pb)
     chosen=[]; assumptions=[]; warnings=[]
+    metrics=[]
     if kind=="周期资源股":
         chosen=["PB历史分位 + NAV资产净值"]
-        # The low-price reference scales today's price by the historical 20th percentile PB.
-        for label,h in (("3年",pb_h.get("3y") if pb_h else None),("5年",pb_h.get("5y") if pb_h else None)):
-            if h and h["q20"] and pb:
-                chosen.append(f"{label}PB低估参考价 {price*h['q20']/pb:.2f}元")
-        assumptions.append("周期资源股不读取PE历史分位；PB低分位换算价假设每股净资产短期不变，仅作历史估值参照。")
-        warnings.append("NAV需逐项核验储量、可采比例、品位、开发成本、税费、资本开支、权益比例及净负债；缺少这些数据不输出伪造NAV。")
-        candidates=[price*pb_h[p]["q20"]/pb for p in ("3y","5y") if pb and pb_h and pb_h.get(p) and pb_h[p]["q20"]]
+        metrics=[("PB",pb,pb_h)]
+        assumptions.append("周期资源股禁止使用PE历史分位定价；仅用PB历史分位作历史参照，NAV需另行核验资源项目净值。")
+        warnings.append("资源股PB换算假设每股净资产短期不变；若商品价格、资产减值或资本开支变化，区间会失真。NAV需核验储量、可采比例、成本、税费、资本开支、权益比例及净负债。")
     elif kind=="稳定高股息/公用事业":
         chosen=["PE + PB历史分位结合"]
-        candidates=[]
-        for metric,h in (("PE",pe_h),("PB",pb_h)):
-            if h:
-                for p in ("3y","5y"):
-                    z=h.get(p)
-                    if z and z["q20"] and (pe if metric=="PE" else pb):
-                        candidates.append(price*z["q20"]/(pe if metric=="PE" else pb))
-        if pe_h: assumptions.append("PE低分位换算价以当前TTM盈利不变为前提。")
-        if pb_h: assumptions.append("PB低分位换算价以当前每股净资产不变为前提。")
-        warnings.append("需确认分红率、自由现金流、债务和资本开支可持续；若盈利或净资产口径突变，历史比较失真。")
+        metrics=[("PE",pe,pe_h),("PB",pb,pb_h)]
+        assumptions.extend(["PE换算假设当前TTM盈利水平可持续。","PB换算假设当前每股净资产口径稳定。"])
+        warnings.append("需核验分红率、自由现金流、债务和资本开支；盈利或净资产口径突变会使历史分位失真。")
     elif kind=="成长股":
         chosen=["PE历史分位为主"]
-        candidates=[]
-        if pe_h:
-            for p in ("3y","5y"):
-                z=pe_h.get(p)
-                if z and z["q20"] and pe:candidates.append(price*z["q20"]/pe)
-        assumptions.append("PE低分位换算价假设未来盈利口径稳定；高增长/亏损阶段PE可能失效。")
-        warnings.append("需验证收入增速、利润率、ROE/ROIC、稀释融资和经营现金流；成长预期下修会使历史分位失去参考意义。")
+        metrics=[("PE",pe,pe_h)]
+        assumptions.append("PE换算假设当前盈利可持续；若处于高增长、亏损或利润拐点阶段，历史PE比较可能失效。")
+        warnings.append("需核验收入增速、利润率、ROE/ROIC、稀释融资和经营现金流；成长预期下修会使历史分位失去参考意义。")
     else:
-        chosen=["数据不足：先确认行业类型"]
-        candidates=[]
-        warnings.append("行业未确认，不生成自动买入区间。请人工确认主营业务及商业模式。")
-    low=min(candidates) if candidates else None
-    high=max(candidates) if candidates else None
-    if low is not None:
-        assumptions.append("建议买入区间为可用3年/5年历史20%分位换算参考价的范围，不是公允价值；数据窗口或不足时不强行补齐。")
-    return {"current_price":price,"buy_low":round(low,2) if low is not None else None,"buy_high":round(high,2) if high is not None else None,"methods":chosen,"assumptions":assumptions,"warnings":warnings,"pe_history":pe_h,"pb_history":pb_h,"history_source":"AkShare / 乐咕乐股个股历史估值序列" if history else None,"history_available":bool(history)}
+        chosen=["不自动生成价格区间"]
+        warnings.append("行业未可靠识别，不输出合理价值或历史买入区间。请先确认主营业务。")
+    fair_l=[]; fair_h=[]; buy_l=[]; buy_h=[]; detail=[]
+    for metric,current,hist in metrics:
+        if current is None or current<=0 or not hist: continue
+        for period in ("3y","5y"):
+            z=hist.get(period)
+            if not z: continue
+            # q40-q60 is a historical middle valuation band (reference fair-value band).
+            # q10-q20 is the lower historical valuation zone (entry reference).
+            if z.get("q40") is not None and z.get("q60") is not None:
+                fair_l.append(price*z["q40"]/current); fair_h.append(price*z["q60"]/current)
+            if z.get("q10") is not None and z.get("q20") is not None:
+                buy_l.append(price*z["q10"]/current); buy_h.append(price*z["q20"]/current)
+            detail.append(f"{metric}-{period}: 当前分位{z.get('percentile')}%，q10={z.get('q10')}，q20={z.get('q20')}，q40={z.get('q40')}，q60={z.get('q60')}")
+    # Combine available periods/methods by median to avoid one window dominating.
+    med=lambda xs: statistics.median(xs) if xs else None
+    fair_low=med(fair_l); fair_high=med(fair_h)
+    buy_low=med(buy_l); buy_high=med(buy_h)
+    if fair_low is not None:
+        assumptions.append("合理价值参考区间：将近3年/5年适用估值指标的历史40%—60%分位，按当前盈利或净资产口径换算为股价；这是历史中枢参考，不是DCF内在价值。")
+    if buy_low is not None:
+        assumptions.append("历史低估买入参考区间：将适用指标近3年/5年历史10%—20%分位换算为股价；低估区间不等于保证安全或未来上涨。")
+    return {"current_price":price,
+        "fair_value_low":round(fair_low,2) if fair_low is not None else None,
+        "fair_value_high":round(fair_high,2) if fair_high is not None else None,
+        "buy_low":round(buy_low,2) if buy_low is not None else None,
+        "buy_high":round(buy_high,2) if buy_high is not None else None,
+        "methods":chosen,"assumptions":assumptions,"warnings":warnings,
+        "history_detail":detail,"pe_history":pe_h,"pb_history":pb_h,
+        "history_source":"AkShare / 乐咕乐股个股历史估值序列" if history else None,
+        "history_available":bool(history)}
 
 @app.get("/api/health")
 def health(): return {"ok":True,"version":"2.0.0"}
