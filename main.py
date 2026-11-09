@@ -170,7 +170,7 @@ def calculate_dcf(body:dict):
     if fcf<=0 or shares<=0 or years<1 or years>10 or discount<=tg or tg<0: raise HTTPException(400,"请检查参数：现金流和股本须大于0，折现率必须高于永续增长率。")
     pv=0; flows=[]
     for y in range(1,years+1):
-        cf=fcf*((1+growth)**y); p=cf/((1+discount)**y); pv+=p; flows.append({"year":y,"fcf":round(cf,2),"pv":round(p,2)})
+        cf=fcf*((1+growth)**(y-1)); p=cf/((1+discount)**y); pv+=p; flows.append({"year":y,"fcf":round(cf,2),"pv":round(p,2)})
     terminal=flows[-1]["fcf"]*(1+tg)/(discount-tg); terminal_pv=terminal/((1+discount)**years)
     ev=pv+terminal_pv; equity=ev+net_cash
     return {"flows":flows,"explicit_pv":round(pv,2),"terminal_value":round(terminal,2),"terminal_pv":round(terminal_pv,2),"enterprise_value":round(ev,2),"equity_value":round(equity,2),"per_share":round(equity/shares,2),"unit":"亿元；每股价值为元"}
