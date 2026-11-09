@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import requests, re, time, statistics
 
 ROOT=Path(__file__).parent
-app=FastAPI(title="股票估值助手",version="2.2.0")
+app=FastAPI(title="股票估值助手",version="2.3.0")
 S=requests.Session()
 S.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36","Referer":"https://quote.eastmoney.com/"})
 CACHE={}
@@ -15,7 +15,8 @@ CACHE_TTL=300
 def clean_code(code):
     code=re.sub(r"\D","",str(code))
     if len(code)!=6: raise ValueError("请输入6位A股代码")
-    if code.startswith(("4","8")): raise ValueError("暂不支持北交所股票")
+    if code.startswith(("4","8","9","200")): raise ValueError("暂不支持北交所、B股及非A股代码")
+    if not code.startswith(("000","001","002","003","300","301","600","601","603","605","688","689")): raise ValueError("暂不支持该代码段，请输入沪深A股股票代码")
     return code
 
 def secid(code): return ("1." if code.startswith(("5","6","9")) else "0.")+code
@@ -50,10 +51,10 @@ def classify(name,code):
     return "待人工确认","暂未匹配可靠行业分类",["不自动估值"],"无法可靠识别行业，暂不生成买入区间。请先确认主营业务。"
 
 def get_quote(code):
-    js=em_get("https://push2.eastmoney.com/api/qt/stock/get",{"secid":secid(code),"fields":"f43,f57,f58,f116,f162,f164,f167,f170","fltt":2,"invt":2,"ut":"fa5fd1943c7b386f172d6893dbfba10b"})
+    js=em_get("https://push2.eastmoney.com/api/qt/stock/get",{"secid":secid(code),"fields":"f43,f57,f58,f116,f162,f164,f167,f170,f173","fltt":2,"invt":2,"ut":"fa5fd1943c7b386f172d6893dbfba10b"})
     d=js.get("data")
     if not d: raise HTTPException(404,"未找到股票，请检查代码")
-    return {"code":code,"name":d.get("f58") or "","price":n(d.get("f43")),"pe_ttm":n(d.get("f162")),"pb":n(d.get("f167")),"roe":n(d.get("f164")),"market_cap":n(d.get("f116")),"change_pct":n(d.get("f170"))}
+    return {"code":code,"name":d.get("f58") or "","price":n(d.get("f43")),"pe_ttm":n(d.get("f164")),"pe_dynamic":n(d.get("f162")),"pb":n(d.get("f167")),"roe":n(d.get("f173")),"market_cap":n(d.get("f116")),"change_pct":n(d.get("f170"))}
 
 def get_history(code):
     # AkShare's current interface is stock_a_lg_indicator(stock=...), not stock_a_indicator_lg(symbol=...).
@@ -62,9 +63,13 @@ def get_history(code):
         import akshare as ak
         df=ak.stock_a_lg_indicator(stock=code)
         if df is None or len(df)==0: return None
-        df=df.reset_index()
+        # Normalize tabular output and older versions with trade_date in the index.
+        if "trade_date" not in [str(x).strip().lower() for x in df.columns] and getattr(df.index,"name",None):
+            df=df.reset_index()
+        else:
+            df=df.reset_index(drop=True)
         cols={str(col).strip().lower():col for col in df.columns}
-        date_col=cols.get("trade_date") or cols.get("日期")
+        date_col=cols.get("trade_date") or cols.get("日期") or cols.get("index")
         pe_col=cols.get("pe_ttm") or cols.get("pe")
         pb_col=cols.get("pb")
         if not date_col or not pb_col: return None
@@ -162,7 +167,7 @@ def make_valuation(q,kind,history):
         "history_available":bool(history)}
 
 @app.get("/api/health")
-def health(): return {"ok":True,"version":"2.2.0","features":["automatic_classification","historical_3y_5y_percentiles","historical_fair_value_band","historical_low_entry_band","dcf_tutorial","nav_tutorial"]}
+def health(): return {"ok":True,"version":"2.3.0","features":["automatic_classification","historical_3y_5y_percentiles","historical_fair_value_band","historical_low_entry_band","dcf_tutorial","nav_tutorial"]}
 
 @app.get("/api/stock/{code}")
 def stock(code:str):
