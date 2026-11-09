@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import requests, re, time, statistics
 
 ROOT=Path(__file__).parent
-app=FastAPI(title="股票估值助手",version="2.0.0")
+app=FastAPI(title="股票估值助手",version="2.2.0")
 S=requests.Session()
 S.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36","Referer":"https://quote.eastmoney.com/"})
 CACHE={}
@@ -162,7 +162,7 @@ def make_valuation(q,kind,history):
         "history_available":bool(history)}
 
 @app.get("/api/health")
-def health(): return {"ok":True,"version":"2.0.0"}
+def health(): return {"ok":True,"version":"2.2.0","features":["automatic_classification","historical_3y_5y_percentiles","historical_fair_value_band","historical_low_entry_band","dcf_tutorial","nav_tutorial"]}
 
 @app.get("/api/stock/{code}")
 def stock(code:str):
@@ -173,7 +173,7 @@ def stock(code:str):
     kind,basis,_,rule=classify(q["name"],code)
     history=get_history(code)
     valuation=make_valuation(q,kind,history)
-    result={**q,"type":kind,"classification_basis":basis,"classification_rule":rule,"valuation":valuation,"as_of":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"risk_disclaimer":"估值仅为历史统计和模型假设，不构成投资建议。历史低估区间不代表未来一定上涨，也不是公允价值。"}
+    result={**q,"type":kind,"classification":kind,"classification_basis":basis,"classification_rule":rule,"valuation":valuation,"valuation_methods":valuation.get("methods",[]),"fair_value_range":[valuation.get("fair_value_low"),valuation.get("fair_value_high")],"historical_low_buy_range":[valuation.get("buy_low"),valuation.get("buy_high")],"as_of":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),"risk_disclaimer":"估值仅为历史统计和模型假设，不构成投资建议。历史低估区间不代表未来一定上涨，也不是公允价值。"}
     CACHE[code]=(time.time(),result)
     return result
 
