@@ -56,31 +56,33 @@ def get_quote(code):
     return {"code":code,"name":d.get("f58") or "","price":n(d.get("f43")),"pe_ttm":n(d.get("f162")),"pb":n(d.get("f167")),"roe":n(d.get("f164")),"market_cap":n(d.get("f116")),"change_pct":n(d.get("f170"))}
 
 def get_history(code):
-    # AkShare wraps LeguLeGu's public individual valuation history. If upstream blocks/changes,
-    # return unavailable rather than manufacturing a percentile.
+    # AkShare's current interface is stock_a_lg_indicator(stock=...), not stock_a_indicator_lg(symbol=...).
+    # Its trade_date is commonly the DataFrame index; normalize it before calculating windows.
     try:
         import akshare as ak
-        df=ak.stock_a_indicator_lg(symbol=code)
+        df=ak.stock_a_lg_indicator(stock=code)
         if df is None or len(df)==0: return None
-        cols={str(c).lower():c for c in df.columns}
+        df=df.reset_index()
+        cols={str(col).strip().lower():col for col in df.columns}
         date_col=cols.get("trade_date") or cols.get("日期")
         pe_col=cols.get("pe_ttm") or cols.get("pe")
         pb_col=cols.get("pb")
         if not date_col or not pb_col: return None
         rows=[]
-        cutoff3=datetime.now().date()-timedelta(days=365*3)
-        cutoff5=datetime.now().date()-timedelta(days=365*5)
+        today=datetime.now().date()
+        cutoff3=today-timedelta(days=365*3)
+        cutoff5=today-timedelta(days=365*5)
         for _,row in df.iterrows():
-            try: dt=row[date_col]
-            except Exception: continue
-            try: day=dt.date() if hasattr(dt,"date") else datetime.strptime(str(dt)[:10],"%Y-%m-%d").date()
+            try:
+                dt=row[date_col]
+                day=dt.date() if hasattr(dt,"date") else datetime.strptime(str(dt)[:10],"%Y-%m-%d").date()
             except Exception: continue
             pe=n(row[pe_col]) if pe_col else None
             pb=n(row[pb_col])
-            if pb is not None and pb>0:
-                rows.append({"date":day.isoformat(),"pe":pe if pe and pe>0 else None,"pb":pb})
-        if not rows: return None
+            rows.append({"date":day.isoformat(),"pe":pe if pe is not None and pe>0 else None,"pb":pb if pb is not None and pb>0 else None})
         rows.sort(key=lambda x:x["date"])
+        rows=[x for x in rows if x["pb"] is not None or x["pe"] is not None]
+        if not rows:return None
         return {"all":rows,"3y":[x for x in rows if datetime.strptime(x["date"],"%Y-%m-%d").date()>=cutoff3],"5y":[x for x in rows if datetime.strptime(x["date"],"%Y-%m-%d").date()>=cutoff5]}
     except Exception:
         return None
