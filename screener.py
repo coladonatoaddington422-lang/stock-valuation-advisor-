@@ -9,6 +9,7 @@ import io
 import json
 import os
 import sqlite3
+from zoneinfo import ZoneInfo
 import time
 import threading
 from datetime import datetime, timedelta
@@ -19,29 +20,67 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import tushare as ts
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:
+    psycopg = None
+    dict_row = None
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 router = APIRouter()
 ROOT = Path(__file__).parent
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DB_PATH = Path(os.getenv("SCREENER_DB_PATH", str(ROOT / "data" / "screener.sqlite3")))
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+if not DATABASE_URL:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 CACHE: dict[str, tuple[float, Any]] = {}
 CACHE_TTL = 180
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+class _DBConnection:
+    """Small compatibility layer: existing qmark SQL works with SQLite and psycopg."""
+    def __init__(self, raw, postgres=False):
+        self.raw = raw
+        self.postgres = postgres
+
+    def _sql(self, sql):
+        return sql.replace("?", "%s") if self.postgres else sql
+
+    def execute(self, sql, params=()):
+        return self.raw.execute(self._sql(sql), params)
+
+    def executemany(self, sql, params):
+        return self.raw.executemany(self._sql(sql), params)
 
 
 @contextmanager
 def _db():
-    con = sqlite3.connect(DB_PATH, timeout=30)
-    con.row_factory = sqlite3.Row
+    if DATABASE_URL:
+        if psycopg is None:
+            raise RuntimeError("已配置 DATABASE_URL，但未安装 psycopg[binary]。")
+        con = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
+        wrapped = _DBConnection(con, postgres=True)
+    else:
+        con = sqlite3.connect(DB_PATH, timeout=30)
+        con.row_factory = sqlite3.Row
+        wrapped = _DBConnection(con)
     try:
-        yield con
+        yield wrapped
         con.commit()
     except Exception:
         con.rollback()
         raise
     finally:
         con.close()
+
+
+def _read_df(sql, params=()):
+    with _db() as con:
+        rows = con.execute(sql, params).fetchall()
+    return pd.DataFrame([dict(row) for row in rows]) if rows else pd.DataFrame()
 
 
 def _query_all(pro, method_name: str, **kwargs):
@@ -99,8 +138,9 @@ def _num(v):
 
 
 def _trade_dates(pro, days=750):
-    end = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=max(900, days * 2))).strftime("%Y%m%d")
+    end_dt = datetime.now(SHANGHAI)
+    end = end_dt.strftime("%Y%m%d")
+    start = (end_dt - timedelta(days=max(900, days * 2))).strftime("%Y%m%d")
     cal = pro.trade_cal(exchange="SSE", start_date=start, end_date=end, is_open="1", fields="cal_date,is_open")
     if cal is None or cal.empty:
         raise HTTPException(502, "Tushare trade_cal 未返回交易日历，请检查接口权限或稍后重试。")
@@ -127,9 +167,9 @@ def screener_status():
     return {
         "ok": True, "token_configured": token_set,
         "cached_trade_dates": dates["n"], "latest_trade_date": dates["latest"],
-        "cached_stocks": stocks["n"], "database": str(DB_PATH),
+        "cached_stocks": stocks["n"], "database": "Neon PostgreSQL" if DATABASE_URL else "本地 SQLite",
         "required_history_days": 500, "target_history_days": 750,
-        "note": "daily_basic 权限不足时仍可计算价格类指标；估值/基本面代理分会显示数据缺失。Render 免费实例本地文件可能在重启后丢失，长期使用请配置持久化磁盘。"
+        "note": "daily_basic 权限不足时仍可计算价格类指标；估值/基本面代理分会显示数据缺失。Neon PostgreSQL 用于持久化行情和任务进度；免费 Web 实例休眠或重启时，正在执行的后台线程可能中断，重新启动任务可续跑。"
     }
 
 
@@ -169,10 +209,16 @@ def screener_backfill(body: dict):
                     "pe_ttm", "pb", "total_mv", "circ_mv"]
             d = d[cols].replace({np.nan: None})
             with _db() as con:
-                con.executemany("""INSERT OR REPLACE INTO daily
+                con.executemany("""INSERT INTO daily
                     (ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount,
                      turnover_rate,volume_ratio,pe_ttm,pb,total_mv,circ_mv)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT (ts_code,trade_date) DO UPDATE SET
+                    open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close,
+                    pre_close=excluded.pre_close, pct_chg=excluded.pct_chg, vol=excluded.vol,
+                    amount=excluded.amount, turnover_rate=excluded.turnover_rate,
+                    volume_ratio=excluded.volume_ratio, pe_ttm=excluded.pe_ttm, pb=excluded.pb,
+                    total_mv=excluded.total_mv, circ_mv=excluded.circ_mv""",
                     [tuple(row) for row in d.itertuples(index=False, name=None)])
             fetched += 1
             rows_saved += len(d)
@@ -386,16 +432,14 @@ def _cached_universe(min_rows=500):
             "SELECT DISTINCT trade_date FROM daily ORDER BY trade_date DESC LIMIT 21").fetchall()
         recent_dates = [r["trade_date"] for r in date_rows]
         placeholders = ",".join("?" for _ in recent_dates)
-        recent = pd.read_sql_query(
+        recent = _read_df(
             f"SELECT ts_code,trade_date,close FROM daily WHERE trade_date IN ({placeholders})",
-            con, params=recent_dates) if recent_dates else pd.DataFrame()
+            tuple(recent_dates)) if recent_dates else pd.DataFrame()
     return latest_date, codes, recent, recent_dates
 
 
 def _load_stock(code):
-    with _db() as con:
-        return pd.read_sql_query(
-            "SELECT * FROM daily WHERE ts_code=? ORDER BY trade_date", con, params=(code,))
+    return _read_df("SELECT * FROM daily WHERE ts_code=? ORDER BY trade_date", (code,))
 
 
 @router.post("/api/screener/scan")
@@ -438,8 +482,10 @@ def screener_scan(body: dict = {}):
               "fundamental_disclaimer": "基本面维度目前使用PE/PB和上市风险代理，未接入完整财报质量评分；请勿将总分视为盈利概率。",
               "results": candidates[:20], "all_results_count": len(rows)}
     with _db() as con:
-        con.execute("INSERT OR REPLACE INTO scan_cache(id,created_at,payload) VALUES(1,?,?)",
-                    (datetime.now().isoformat(timespec="seconds"), json.dumps(result, ensure_ascii=False)))
+        con.execute("""INSERT INTO scan_cache(id,created_at,payload) VALUES(1,?,?)
+                    ON CONFLICT (id) DO UPDATE SET
+                    created_at=excluded.created_at, payload=excluded.payload""",
+                    (datetime.now(SHANGHAI).isoformat(timespec="seconds"), json.dumps(result, ensure_ascii=False)))
     CACHE["latest"] = (time.time(), result)
     return result
 
@@ -558,9 +604,8 @@ def screener_export():
 
 
 # ---------------- Automatic initialization + scan runner ----------------
-# Progress is persisted in SQLite. If the web process restarts mid-run, the
-# persisted state remains visible and the user can safely resume; each batch
-# is idempotent because daily rows use INSERT OR REPLACE.
+# Progress is persisted in the configured database. A process restart interrupts
+# the in-process worker; the next manual start resumes from idempotent cached rows.
 _AUTO_LOCK = threading.Lock()
 _AUTO_THREAD = None
 
@@ -574,12 +619,16 @@ def _auto_job_init():
         )""")
 
 _auto_job_init()
+with _db() as _con:
+    _con.execute("""UPDATE auto_job SET state='interrupted', phase='interrupted',
+                    message='服务进程曾重启；已保存的行情不会丢失，重新点击自动初始化即可续跑。'
+                    WHERE id=1 AND state='running'""")
 
 def _auto_job_update(**values):
     allowed = {"state","phase","batches_done","fetched_days","rows_saved",
                "remaining","started_at","updated_at","message","result_json"}
     values = {k:v for k,v in values.items() if k in allowed}
-    values["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    values["updated_at"] = datetime.now(SHANGHAI).isoformat(timespec="seconds")
     with _db() as con:
         row = con.execute("SELECT id FROM auto_job WHERE id=1").fetchone()
         if row:
@@ -637,10 +686,14 @@ def screener_auto_run():
         job = _auto_job_read()
         if job.get("state") == "running" and _AUTO_THREAD is not None and _AUTO_THREAD.is_alive():
             return {"ok":True,"started":False,"job":job,"message":"自动任务已经在运行。"}
-        _auto_job_update(state="running", phase="starting", batches_done=0,
-                         fetched_days=0, rows_saved=0, remaining=750,
-                         started_at=datetime.utcnow().isoformat(timespec="seconds")+"Z",
-                         message="自动任务已启动。")
+        if job.get("state") not in ("interrupted", "failed", "running"):
+            _auto_job_update(state="running", phase="starting", batches_done=0,
+                             fetched_days=0, rows_saved=0, remaining=750,
+                             started_at=datetime.now(SHANGHAI).isoformat(timespec="seconds"),
+                             message="自动任务已启动。")
+        else:
+            _auto_job_update(state="running", phase="starting",
+                             message="正在从数据库中已保存的行情进度继续执行。")
         _AUTO_THREAD = threading.Thread(target=_auto_runner, daemon=True, name="screener-auto-runner")
         _AUTO_THREAD.start()
     return {"ok":True,"started":True,"message":"自动初始化与扫描任务已启动，可通过 /api/screener/auto-status 查看进度。"}
