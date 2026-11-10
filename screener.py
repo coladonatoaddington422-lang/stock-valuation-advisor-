@@ -429,12 +429,13 @@ def screener_scan(body: dict = {}):
         except Exception:
             continue
     rows.sort(key=lambda z: (z["score"], z["formula_signal"], z["ret20"] or -999), reverse=True)
-    candidates = [x for x in rows if x["formula_recent"] or x["stage"] == "突破确认"]
+    min_score = max(0, min(int(body.get("min_score", 70)), 100))
+    candidates = [x for x in rows if x["score"] >= min_score and (x["formula_recent"] or x["stage"] == "突破确认")]
     result = {"ok": True, "trade_date": latest_date, "universe_scanned": len(rows),
-              "candidate_count": len(candidates), "market_return_20d_proxy": round(market_ret, 2) if market_ret is not None else None,
+              "minimum_score": min_score, "candidate_count": len(candidates), "market_return_20d_proxy": round(market_ret, 2) if market_ret is not None else None,
               "score_weights": {"资金公式":20,"趋势结构":20,"成交量":15,"筹码压力":15,"相对强度":15,"基本面风险代理":15},
               "fundamental_disclaimer": "基本面维度目前使用PE/PB和上市风险代理，未接入完整财报质量评分；请勿将总分视为盈利概率。",
-              "results": candidates[:200], "all_results_count": len(rows)}
+              "results": candidates[:20], "all_results_count": len(rows)}
     with _db() as con:
         con.execute("INSERT OR REPLACE INTO scan_cache(id,created_at,payload) VALUES(1,?,?)",
                     (datetime.now().isoformat(timespec="seconds"), json.dumps(result, ensure_ascii=False)))
