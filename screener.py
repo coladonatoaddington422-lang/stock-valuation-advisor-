@@ -551,6 +551,6 @@ def screener_export():
                        "候选数量": data.get("candidate_count"), "评分说明": data.get("fundamental_disclaimer")}]).to_excel(
                            writer, index=False, sheet_name="说明")
     buf.seek(0)
-    filename = f"资金异动选股_{data.get('trade_date','latest')}.xlsx"
+    filename = f"stock_screener_{data.get('trade_date','latest')}.xlsx"
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
