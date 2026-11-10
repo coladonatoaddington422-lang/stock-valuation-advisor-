@@ -111,8 +111,8 @@ def _stock_meta(pro):
                     fields="ts_code,symbol,name,market,industry,list_date")
     if df is None or df.empty:
         raise HTTPException(502, "Tushare stock_basic 未返回股票列表。")
-    # 本版扫描沪深A股；排除北交所、B股及风险警示股。
-    df = df[df["ts_code"].str.endswith((".SH", ".SZ"))].copy()
+    # 本版扫描沪深京A股；排除B股及风险警示股。
+    df = df[df["ts_code"].str.endswith((".SH", ".SZ", ".BJ"))].copy()
     df = df[~df["name"].fillna("").str.contains(r"ST|退", case=False, regex=True)]
     return df
 
@@ -259,8 +259,8 @@ def _score_one(g: pd.DataFrame, market_return_20: float | None):
     ma60s = close.rolling(60).mean()
     ma20, ma60 = ma20s.iloc[-1], ma60s.iloc[-1]
     ma20_prev = ma20s.iloc[-6] if len(ma20s) >= 6 else np.nan
-    vol5, vol20 = vol.rolling(5).mean().iloc[-1], vol.rolling(20).mean().iloc[-1]
-    amount5 = amount.rolling(5).mean().iloc[-1]
+    vol5, vol20 = vol.rolling(5).mean().iloc[-1], vol.iloc[-21:-1].mean()
+    amount5 = amount.iloc[-6:-1].mean()
     ret5 = _pct(close.iloc[-1], close.iloc[-6]) if len(close) >= 6 else None
     ret20 = _pct(close.iloc[-1], close.iloc[-21]) if len(close) >= 21 else None
     ret60 = _pct(close.iloc[-1], close.iloc[-61]) if len(close) >= 61 else None
@@ -327,6 +327,10 @@ def _score_one(g: pd.DataFrame, market_return_20: float | None):
     if pb is not None and 0 < pb <= 5:
         fundamental += 3
         reasons.append("PB不高于5")
+    total_mv = _num(r.get("total_mv"))
+    if total_mv is not None and total_mv >= 500000:  # Tushare total_mv unit: 10k CNY; threshold ~= RMB 5bn
+        fundamental += 2
+        reasons.append("总市值代理不低于50亿元")
     fundamental = min(15, fundamental)
 
     total = int(round(capital_score + trend + volume_score + pressure + relative + fundamental))
@@ -474,9 +478,9 @@ def screener_backtest(body: dict):
             ma20 = c_hist.tail(20).mean()
             ma60 = c_hist.tail(60).mean()
             ma20_prev = c_hist.iloc[-25:-5].mean() if len(c_hist) >= 25 else ma20
-            vol20 = v_hist.tail(20).mean()
+            vol20 = v_hist.iloc[-21:-1].mean()
             vol_ratio = float(v_hist.iloc[-1] / vol20) if vol20 else 0
-            amount5 = hist["amount"].tail(5).mean()
+            amount5 = hist["amount"].iloc[-6:-1].mean()
             amount_ratio = float(hist["amount"].iloc[-1] / amount5) if amount5 else 0
             ret20 = (close[i] / close[i-20] - 1) * 100 if close[i-20] else 0
             ret5 = (close[i] / close[i-5] - 1) * 100 if close[i-5] else 0
