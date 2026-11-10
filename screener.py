@@ -97,7 +97,7 @@ def _num(v):
         return None
 
 
-def _trade_dates(pro, days=520):
+def _trade_dates(pro, days=750):
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=max(900, days * 2))).strftime("%Y%m%d")
     cal = pro.trade_cal(exchange="SSE", start_date=start, end_date=end, is_open="1", fields="cal_date,is_open")
@@ -127,7 +127,7 @@ def screener_status():
         "ok": True, "token_configured": token_set,
         "cached_trade_dates": dates["n"], "latest_trade_date": dates["latest"],
         "cached_stocks": stocks["n"], "database": str(DB_PATH),
-        "required_history_days": 500,
+        "required_history_days": 500, "target_history_days": 750,
         "note": "daily_basic 权限不足时仍可计算价格类指标；估值/基本面代理分会显示数据缺失。Render 免费实例本地文件可能在重启后丢失，长期使用请配置持久化磁盘。"
     }
 
@@ -137,13 +137,13 @@ def screener_backfill(body: dict):
     """Fetch a small batch of recent market-wide trading dates. Repeat until remaining=0."""
     pro = _pro()
     batch = max(1, min(int(body.get("batch", 20)), 40))
-    dates = _trade_dates(pro, 520)
+    dates = _trade_dates(pro, 750)
     with _db() as con:
         existing = {r["trade_date"] for r in con.execute("SELECT DISTINCT trade_date FROM daily")}
     missing = [d for d in dates if d not in existing]
     target = missing[-batch:]
     if not target:
-        return {"ok": True, "fetched": 0, "remaining": 0, "message": "最近520个交易日的日线缓存已齐备。"}
+        return {"ok": True, "fetched": 0, "remaining": 0, "message": "最近750个交易日的日线缓存已齐备。"}
     fetched, rows_saved, daily_basic_ok, errors = 0, 0, 0, []
     for day in target:
         try:
@@ -428,7 +428,7 @@ def screener_scan(body: dict = {}):
             rows.append(result)
         except Exception:
             continue
-    rows.sort(key=lambda z: (z["score"], z["formula_signal"], z["ret20"] or -999), reverse=True)
+    rows.sort(key=lambda z: (z["score"], z["formula_signal"], z["ret20"] if z["ret20"] is not None else -999), reverse=True)
     min_score = max(0, min(int(body.get("min_score", 70)), 100))
     candidates = [x for x in rows if x["score"] >= min_score and (x["formula_recent"] or x["stage"] == "突破确认")]
     result = {"ok": True, "trade_date": latest_date, "universe_scanned": len(rows),
