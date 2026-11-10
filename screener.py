@@ -367,12 +367,30 @@ def _score_one(g: pd.DataFrame, market_return_20: float | None):
     }
 
 
-def _load_frame():
+def _cached_universe(min_rows=500):
+    """Return eligible codes and a small recent-date slice; avoid loading millions of rows into RAM."""
     with _db() as con:
-        df = pd.read_sql_query("SELECT * FROM daily ORDER BY ts_code, trade_date", con)
-    if df.empty:
-        raise HTTPException(409, "本地还没有行情缓存。请先点击“初始化行情”，分批拉取最近520个交易日。")
-    return df
+        latest_row = con.execute("SELECT MAX(trade_date) latest FROM daily").fetchone()
+        latest_date = latest_row["latest"]
+        if not latest_date:
+            raise HTTPException(409, "本地还没有行情缓存。请先点击“初始化行情”，分批拉取最近520个交易日。")
+        codes = [r["ts_code"] for r in con.execute(
+            "SELECT ts_code FROM daily GROUP BY ts_code HAVING COUNT(*)>=? AND MAX(trade_date)=?",
+            (min_rows, latest_date))]
+        date_rows = con.execute(
+            "SELECT DISTINCT trade_date FROM daily ORDER BY trade_date DESC LIMIT 21").fetchall()
+        recent_dates = [r["trade_date"] for r in date_rows]
+        placeholders = ",".join("?" for _ in recent_dates)
+        recent = pd.read_sql_query(
+            f"SELECT ts_code,trade_date,close FROM daily WHERE trade_date IN ({placeholders})",
+            con, params=recent_dates) if recent_dates else pd.DataFrame()
+    return latest_date, codes, recent, recent_dates
+
+
+def _load_stock(code):
+    with _db() as con:
+        return pd.read_sql_query(
+            "SELECT * FROM daily WHERE ts_code=? ORDER BY trade_date", con, params=(code,))
 
 
 @router.post("/api/screener/scan")
@@ -380,23 +398,21 @@ def screener_scan(body: dict = {}):
     force = bool(body.get("force", False))
     if not force and "latest" in CACHE and time.time() - CACHE["latest"][0] < CACHE_TTL:
         return CACHE["latest"][1]
-    df = _load_frame()
-    meta = _stock_meta(_pro())
-    meta = meta.set_index("ts_code")
-    df = df[df["ts_code"].isin(meta.index)]
-    latest_date = df["trade_date"].max()
-    latest = df[df["trade_date"] == latest_date]
+    latest_date, codes, recent, recent_dates = _cached_universe(500)
+    meta = _stock_meta(_pro()).set_index("ts_code")
+    codes = [code for code in codes if code in meta.index]
     returns = []
-    for _, g in df.groupby("ts_code", sort=False):
-        g = g.sort_values("trade_date")
-        if len(g) >= 21 and str(g["trade_date"].iloc[-1]) == str(latest_date):
-            rr = _pct(float(g["close"].iloc[-1]), float(g["close"].iloc[-21]))
-            if rr is not None: returns.append(rr)
+    if len(recent_dates) >= 21 and not recent.empty:
+        pivot = recent.pivot_table(index="ts_code", columns="trade_date", values="close", aggfunc="last")
+        newest, oldest = recent_dates[0], recent_dates[-1]
+        if newest in pivot.columns and oldest in pivot.columns:
+            rr = (pivot[newest] / pivot[oldest] - 1) * 100
+            returns = rr.replace([np.inf, -np.inf], np.nan).dropna().tolist()
     market_ret = float(np.mean(returns)) if returns else None
     rows = []
-    for code, g in df.groupby("ts_code", sort=False):
-        g = g.sort_values("trade_date")
-        if len(g) < 500 or code not in meta.index or str(g["trade_date"].iloc[-1]) != str(latest_date):
+    for code in codes:
+        g = _load_stock(code)
+        if g.empty or str(g["trade_date"].iloc[-1]) != str(latest_date):
             continue
         try:
             result = _score_one(g, market_ret)
@@ -424,14 +440,16 @@ def screener_scan(body: dict = {}):
 
 @router.post("/api/screener/backtest")
 def screener_backtest(body: dict):
-    df = _load_frame()
+    with _db() as con:
+        codes = [r["ts_code"] for r in con.execute(
+            "SELECT ts_code FROM daily GROUP BY ts_code HAVING COUNT(*)>=520")]
     start = str(body.get("start_date", ""))  # YYYYMMDD optional
     end = str(body.get("end_date", ""))      # YYYYMMDD optional
     horizon = max(5, min(int(body.get("horizon", 10)), 20))
     min_score = max(0, min(int(body.get("min_score", 70)), 100))
     records = []
-    for code, g in df.groupby("ts_code", sort=False):
-        g = g.sort_values("trade_date").reset_index(drop=True)
+    for code in codes:
+        g = _load_stock(code).sort_values("trade_date").reset_index(drop=True)
         if len(g) < 520:
             continue
         g = calc_original_formula(g)
