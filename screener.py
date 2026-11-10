@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import time
+import threading
 from datetime import datetime, timedelta
 from contextlib import contextmanager
 from pathlib import Path
@@ -554,3 +555,104 @@ def screener_export():
     filename = f"stock_screener_{data.get('trade_date','latest')}.xlsx"
     return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ---------------- Automatic initialization + scan runner ----------------
+# Progress is persisted in SQLite. If the web process restarts mid-run, the
+# persisted state remains visible and the user can safely resume; each batch
+# is idempotent because daily rows use INSERT OR REPLACE.
+_AUTO_LOCK = threading.Lock()
+_AUTO_THREAD = None
+
+def _auto_job_init():
+    with _db() as con:
+        con.execute("""CREATE TABLE IF NOT EXISTS auto_job (
+            id INTEGER PRIMARY KEY CHECK(id=1), state TEXT, phase TEXT,
+            batches_done INTEGER DEFAULT 0, fetched_days INTEGER DEFAULT 0,
+            rows_saved INTEGER DEFAULT 0, remaining INTEGER,
+            started_at TEXT, updated_at TEXT, message TEXT, result_json TEXT
+        )""")
+
+_auto_job_init()
+
+def _auto_job_update(**values):
+    allowed = {"state","phase","batches_done","fetched_days","rows_saved",
+               "remaining","started_at","updated_at","message","result_json"}
+    values = {k:v for k,v in values.items() if k in allowed}
+    values["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with _db() as con:
+        row = con.execute("SELECT id FROM auto_job WHERE id=1").fetchone()
+        if row:
+            assignments = ", ".join(f"{k}=?" for k in values)
+            con.execute(f"UPDATE auto_job SET {assignments} WHERE id=1", tuple(values.values()))
+        else:
+            cols = ", ".join(["id"] + list(values.keys()))
+            marks = ", ".join(["?"] * (len(values)+1))
+            con.execute(f"INSERT INTO auto_job ({cols}) VALUES ({marks})", tuple([1]+list(values.values())))
+
+def _auto_job_read():
+    with _db() as con:
+        row = con.execute("SELECT * FROM auto_job WHERE id=1").fetchone()
+    if not row:
+        return {"state":"idle","phase":"idle","batches_done":0,"fetched_days":0,
+                "rows_saved":0,"remaining":None,"message":"尚未启动自动任务。"}
+    return dict(row)
+
+def _auto_runner():
+    try:
+        _auto_job_update(state="running", phase="backfill", message="正在分批下载最近750个交易日行情。")
+        while True:
+            result = screener_backfill({"batch":20})
+            job = _auto_job_read()
+            _auto_job_update(
+                state="running", phase="backfill",
+                batches_done=int(job.get("batches_done") or 0)+1,
+                fetched_days=int(job.get("fetched_days") or 0)+int(result.get("fetched") or 0),
+                rows_saved=int(job.get("rows_saved") or 0)+int(result.get("rows_saved") or 0),
+                remaining=int(result.get("remaining") or 0),
+                message=result.get("message") or "行情批次已完成。"
+            )
+            if int(result.get("remaining") or 0) == 0:
+                break
+            if int(result.get("fetched") or 0) == 0:
+                raise RuntimeError("本批没有成功写入行情，但仍有未完成交易日；请检查 Tushare 权限、积分、频率限制及错误信息。")
+        _auto_job_update(state="running", phase="scan", message="历史行情已齐备，正在执行全市场扫描。")
+        scan_result = screener_scan({"force": True})
+        _auto_job_update(state="completed", phase="completed",
+                         remaining=0, message="行情初始化和全市场扫描均已完成。",
+                         result_json=json.dumps(scan_result, ensure_ascii=False, default=str))
+    except Exception as exc:
+        _auto_job_update(state="failed", phase="failed", message=str(exc)[:1000])
+    finally:
+        with _AUTO_LOCK:
+            global _AUTO_THREAD
+            _AUTO_THREAD = None
+
+@router.post("/api/screener/auto-run")
+def screener_auto_run():
+    global _AUTO_THREAD
+    if not os.getenv("TUSHARE_TOKEN", "").strip():
+        raise HTTPException(503, "未检测到 TUSHARE_TOKEN，请先在 Render 服务 Environment 中配置。")
+    with _AUTO_LOCK:
+        job = _auto_job_read()
+        if job.get("state") == "running" and _AUTO_THREAD is not None and _AUTO_THREAD.is_alive():
+            return {"ok":True,"started":False,"job":job,"message":"自动任务已经在运行。"}
+        _auto_job_update(state="running", phase="starting", batches_done=0,
+                         fetched_days=0, rows_saved=0, remaining=750,
+                         started_at=datetime.utcnow().isoformat(timespec="seconds")+"Z",
+                         message="自动任务已启动。")
+        _AUTO_THREAD = threading.Thread(target=_auto_runner, daemon=True, name="screener-auto-runner")
+        _AUTO_THREAD.start()
+    return {"ok":True,"started":True,"message":"自动初始化与扫描任务已启动，可通过 /api/screener/auto-status 查看进度。"}
+
+@router.get("/api/screener/auto-status")
+def screener_auto_status():
+    job = _auto_job_read()
+    result = None
+    if job.get("result_json"):
+        try:
+            result = json.loads(job["result_json"])
+        except Exception:
+            result = None
+    job["result"] = result
+    return {"ok":True,"job":job}
