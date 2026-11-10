@@ -11,6 +11,7 @@ import os
 import sqlite3
 import time
 from datetime import datetime, timedelta
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -28,10 +29,37 @@ CACHE: dict[str, tuple[float, Any]] = {}
 CACHE_TTL = 180
 
 
+@contextmanager
 def _db():
     con = sqlite3.connect(DB_PATH, timeout=30)
     con.row_factory = sqlite3.Row
-    return con
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def _query_all(pro, method_name: str, **kwargs):
+    """Paginate Tushare endpoints whose default response limit may truncate the A-share universe."""
+    method = getattr(pro, method_name)
+    frames = []
+    offset = 0
+    page_size = 5000
+    while True:
+        page = method(**kwargs, limit=page_size, offset=offset)
+        if page is None or page.empty:
+            break
+        frames.append(page)
+        if len(page) < page_size:
+            break
+        offset += page_size
+        if offset >= 20000:
+            break
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def _init_db():
@@ -79,8 +107,8 @@ def _trade_dates(pro, days=520):
 
 
 def _stock_meta(pro):
-    df = pro.stock_basic(exchange="", list_status="L",
-                         fields="ts_code,symbol,name,market,industry,list_date")
+    df = _query_all(pro, "stock_basic", exchange="", list_status="L",
+                    fields="ts_code,symbol,name,market,industry,list_date")
     if df is None or df.empty:
         raise HTTPException(502, "Tushare stock_basic 未返回股票列表。")
     # 本版扫描沪深A股；排除北交所、B股及风险警示股。
@@ -119,13 +147,13 @@ def screener_backfill(body: dict):
     fetched, rows_saved, daily_basic_ok, errors = 0, 0, 0, []
     for day in target:
         try:
-            d = pro.daily(trade_date=day)
+            d = _query_all(pro, "daily", trade_date=day)
             if d is None or d.empty:
                 errors.append({"date": day, "error": "daily无数据"})
                 continue
             b = None
             try:
-                b = pro.daily_basic(trade_date=day,
+                b = _query_all(pro, "daily_basic", trade_date=day,
                     fields="ts_code,trade_date,turnover_rate,volume_ratio,pe_ttm,pb,total_mv,circ_mv")
                 if b is not None and not b.empty:
                     daily_basic_ok += 1
@@ -375,8 +403,8 @@ def screener_scan(body: dict = {}):
             if result is None: continue
             info = meta.loc[code]
             result.update({"ts_code": code, "name": str(info["name"]),
-                           "industry": str(info.get("industry") or ""),
-                           "market": str(info.get("market") or "")})
+                           "industry": "" if pd.isna(info.get("industry")) else str(info.get("industry")),
+                           "market": "" if pd.isna(info.get("market")) else str(info.get("market"))})
             rows.append(result)
         except Exception:
             continue
