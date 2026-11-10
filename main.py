@@ -1,12 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from screener import router as screener_router
 from pathlib import Path
 from datetime import datetime, timedelta
 import requests, re, time, statistics
 
 ROOT=Path(__file__).parent
-app=FastAPI(title="股票估值助手",version="2.4.0")
+app=FastAPI(title="股票估值助手",version="2.5.0")
+app.include_router(screener_router)
 S=requests.Session()
 S.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36","Referer":"https://quote.eastmoney.com/"})
 CACHE={}
@@ -167,7 +169,7 @@ def make_valuation(q,kind,history):
         "history_available":bool(history)}
 
 @app.get("/api/health")
-def health(): return {"ok":True,"version":"2.3.0","features":["automatic_classification","historical_3y_5y_percentiles","historical_fair_value_band","historical_low_entry_band","dcf_tutorial","nav_tutorial"]}
+def health(): return {"ok":True,"version":"2.5.0","features":["tushare_breakout_screener","automatic_classification","historical_3y_5y_percentiles","historical_fair_value_band","historical_low_entry_band","dcf_tutorial","nav_tutorial"]}
 
 @app.get("/api/stock/{code}")
 def stock(code:str):
@@ -204,6 +206,9 @@ def calculate_nav(body:dict):
     if shares<=0 or any(v<0 for v in vals):raise HTTPException(400,"请输入非负资产/负债金额及正数总股本。")
     equity=vals[0]+vals[1]+vals[2]+vals[3]-vals[4]
     return {"potash_value":vals[0],"lithium_value":vals[1],"other_assets":vals[2],"net_cash":vals[3],"other_liabilities":vals[4],"equity_nav":round(equity,2),"per_share":round(equity/shares,2),"unit":"亿元；每股价值为元"}
+
+@app.get("/screener")
+def screener_page(): return FileResponse(ROOT/"static"/"screener.html")
 
 @app.get("/")
 def home(): return FileResponse(ROOT/"static"/"index.html")
