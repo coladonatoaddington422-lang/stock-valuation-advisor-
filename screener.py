@@ -72,7 +72,7 @@ def _num(v):
 def _trade_dates(pro, days=520):
     end = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=max(900, days * 2))).strftime("%Y%m%d")
-    cal = pro.trade_cal(exchange="", start_date=start, end_date=end, is_open="1", fields="cal_date,is_open")
+    cal = pro.trade_cal(exchange="SSE", start_date=start, end_date=end, is_open="1", fields="cal_date,is_open")
     if cal is None or cal.empty:
         raise HTTPException(502, "Tushare trade_cal 未返回交易日历，请检查接口权限或稍后重试。")
     return sorted(cal["cal_date"].astype(str).tolist())[-days:]
@@ -361,14 +361,14 @@ def screener_scan(body: dict = {}):
     returns = []
     for _, g in df.groupby("ts_code", sort=False):
         g = g.sort_values("trade_date")
-        if len(g) >= 21:
+        if len(g) >= 21 and str(g["trade_date"].iloc[-1]) == str(latest_date):
             rr = _pct(float(g["close"].iloc[-1]), float(g["close"].iloc[-21]))
             if rr is not None: returns.append(rr)
     market_ret = float(np.mean(returns)) if returns else None
     rows = []
     for code, g in df.groupby("ts_code", sort=False):
         g = g.sort_values("trade_date")
-        if len(g) < 500 or code not in meta.index:
+        if len(g) < 500 or code not in meta.index or str(g["trade_date"].iloc[-1]) != str(latest_date):
             continue
         try:
             result = _score_one(g, market_ret)
@@ -410,6 +410,7 @@ def screener_backtest(body: dict):
         close = g["close"].astype(float).to_numpy()
         high = g["high"].astype(float).to_numpy()
         low = g["low"].astype(float).to_numpy()
+        open_ = g["open"].astype(float).to_numpy()
         dates = g["trade_date"].astype(str).to_numpy()
         # Use only historical rows with a full 500-bar lookback and enough future bars.
         last_signal = -999
@@ -456,7 +457,7 @@ def screener_backtest(body: dict):
             score = int(round(capital_score + trend_score + volume_score + pressure_score + relative_score + fundamental_score))
             if score < min_score: continue
             stage = "突破确认" if close[i] > high20_prev and vol_ratio >= 1.5 and float(hist["pct_chg"].iloc[-1]) > 0 else "启动准备" if formula_recent and close[i] > ma20 and ma20 >= ma20_prev else "潜伏观察"
-            entry = close[i]
+            entry = open_[i+1]  # signal is known after close; theoretical entry is next session open
             future_close = close[i+1:i+horizon+1]
             future_high = high[i+1:i+horizon+1]
             future_low = low[i+1:i+horizon+1]
@@ -478,7 +479,7 @@ def screener_backtest(body: dict):
               "avg_max_drawdown_pct": round(float(r["max_drawdown_pct"].mean()), 2),
               "stage_summary": r.groupby("stage")["horizon_return_pct"].agg(["count","mean"]).round(2).reset_index().to_dict("records"),
               "best_20": r.sort_values("horizon_return_pct", ascending=False).head(20).replace({np.nan: None}).to_dict("records"),
-              "caveat": "这是按历史收盘信号、下一交易日收盘买入的简化统计；未扣除手续费、滑点、涨跌停无法成交影响，且当前缓存/股票池可能存在幸存者偏差。回测使用点时六维近似评分，基本面分为中性占位，相对强度以个股收益代理，和实时评分仍有差异。"}
+              "caveat": "这是按历史收盘信号、下一交易日开盘理论买入的简化统计；未扣除手续费、滑点、涨跌停无法成交影响，且当前缓存/股票池可能存在幸存者偏差。回测使用点时六维近似评分，基本面分为中性占位，相对强度以个股收益代理，和实时评分仍有差异。"}
     return result
 
 
