@@ -113,6 +113,8 @@ def _init_db():
             PRIMARY KEY(ts_code, trade_date))""")
         con.execute("CREATE INDEX IF NOT EXISTS idx_daily_date ON daily(trade_date)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_daily_code_date ON daily(ts_code, trade_date)")
+        con.execute("""CREATE TABLE IF NOT EXISTS trade_date_cache (
+            id INTEGER PRIMARY KEY CHECK(id=1), dates_json TEXT NOT NULL, updated_at TEXT NOT NULL)""")
         con.execute("""CREATE TABLE IF NOT EXISTS scan_cache (
             id INTEGER PRIMARY KEY CHECK(id=1), created_at TEXT, payload TEXT)""")
 
@@ -138,17 +140,36 @@ def _num(v):
 
 
 def _trade_dates(pro, days=750):
-    """120-point fallback: infer open sessions from one liquid A-share's daily bars.
-    This avoids trade_cal, which requires a higher Tushare point tier.
-    """
+    """Load the trading-session calendar from Neon first; call Tushare daily only once."""
+    with _db() as con:
+        cached = con.execute("SELECT dates_json FROM trade_date_cache WHERE id=1").fetchone()
+    if cached:
+        try:
+            saved = json.loads(cached["dates_json"])
+            if isinstance(saved, list) and len(saved) >= min(days, 500):
+                return saved[-days:]
+        except Exception:
+            pass
+
     end_dt = datetime.now(SHANGHAI)
     end = end_dt.strftime("%Y%m%d")
     start = (end_dt - timedelta(days=max(1100, days * 2))).strftime("%Y%m%d")
-    bars = pro.daily(ts_code="000001.SZ", start_date=start, end_date=end,
-                     fields="trade_date", limit=6000)
-    if bars is None or bars.empty:
-        raise HTTPException(502, "Tushare daily 无法返回交易日，请检查 120 积分日线权限。")
-    return sorted(bars["trade_date"].astype(str).unique().tolist())[-days:]
+    try:
+        bars = pro.daily(ts_code="000001.SZ", start_date=start, end_date=end,
+                         fields="trade_date", limit=6000)
+    except Exception as exc:
+        raise RuntimeError(f"获取交易日期失败（Tushare daily，000001.SZ）：{str(exc)[:500]}") from exc
+    if bars is None or bars.empty or "trade_date" not in bars.columns:
+        raise RuntimeError("获取交易日期失败：Tushare daily 返回空数据或缺少 trade_date 字段。")
+    dates = sorted(bars["trade_date"].astype(str).unique().tolist())[-days:]
+    if len(dates) < min(days, 500):
+        raise RuntimeError(f"获取交易日期数量不足：需要约{days}天，实际仅取得{len(dates)}天。")
+    with _db() as con:
+        con.execute("""INSERT INTO trade_date_cache(id, dates_json, updated_at)
+            VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET
+            dates_json=excluded.dates_json, updated_at=excluded.updated_at""",
+            (json.dumps(dates, ensure_ascii=False), datetime.now(SHANGHAI).isoformat(timespec="seconds")))
+    return dates
 
 
 def _stock_meta(pro):
@@ -662,7 +683,9 @@ def _auto_runner():
             if int(result.get("remaining") or 0) == 0:
                 break
             if int(result.get("fetched") or 0) == 0:
-                raise RuntimeError("本批没有成功写入行情，但仍有未完成交易日；请检查 Tushare 权限、积分、频率限制及错误信息。")
+                detail = result.get("errors") or []
+                raise RuntimeError("本批没有成功写入行情；具体接口错误：" +
+                                   json.dumps(detail[:8], ensure_ascii=False, default=str)[:1800])
         _auto_job_update(state="running", phase="scan", message="历史行情已齐备，正在执行全市场扫描。")
         scan_result = screener_scan({"force": True})
         _auto_job_update(state="completed", phase="completed",
