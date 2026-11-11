@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from screener import router as screener_router
+from system_diagnostics import router as diagnostics_router
 from pathlib import Path
 from datetime import datetime, timedelta
 import requests, re, time, statistics
@@ -9,6 +10,7 @@ import requests, re, time, statistics
 ROOT=Path(__file__).parent
 app=FastAPI(title="股票估值助手",version="2.5.0")
 app.include_router(screener_router)
+app.include_router(diagnostics_router)
 S=requests.Session()
 S.headers.update({"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36","Referer":"https://quote.eastmoney.com/"})
 CACHE={}
