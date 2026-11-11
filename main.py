@@ -209,7 +209,7 @@ def calculate_nav(body:dict):
     equity=vals[0]+vals[1]+vals[2]+vals[3]-vals[4]
     return {"potash_value":vals[0],"lithium_value":vals[1],"other_assets":vals[2],"net_cash":vals[3],"other_liabilities":vals[4],"equity_nav":round(equity,2),"per_share":round(equity/shares,2),"unit":"亿元；每股价值为元"}
 
-@app.get("/screener")
+@app.api_route("/screener", methods=["GET", "HEAD"])
 def screener_page(): return FileResponse(ROOT/"static"/"screener.html")
 
 @app.get("/")
