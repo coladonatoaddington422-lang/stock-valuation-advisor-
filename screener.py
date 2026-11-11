@@ -138,24 +138,29 @@ def _num(v):
 
 
 def _trade_dates(pro, days=750):
+    """120-point fallback: infer open sessions from one liquid A-share's daily bars.
+    This avoids trade_cal, which requires a higher Tushare point tier.
+    """
     end_dt = datetime.now(SHANGHAI)
     end = end_dt.strftime("%Y%m%d")
-    start = (end_dt - timedelta(days=max(900, days * 2))).strftime("%Y%m%d")
-    cal = pro.trade_cal(exchange="SSE", start_date=start, end_date=end, is_open="1", fields="cal_date,is_open")
-    if cal is None or cal.empty:
-        raise HTTPException(502, "Tushare trade_cal 未返回交易日历，请检查接口权限或稍后重试。")
-    return sorted(cal["cal_date"].astype(str).tolist())[-days:]
+    start = (end_dt - timedelta(days=max(1100, days * 2))).strftime("%Y%m%d")
+    bars = pro.daily(ts_code="000001.SZ", start_date=start, end_date=end,
+                     fields="trade_date", limit=6000)
+    if bars is None or bars.empty:
+        raise HTTPException(502, "Tushare daily 无法返回交易日，请检查 120 积分日线权限。")
+    return sorted(bars["trade_date"].astype(str).unique().tolist())[-days:]
 
 
 def _stock_meta(pro):
-    df = _query_all(pro, "stock_basic", exchange="", list_status="L",
-                    fields="ts_code,symbol,name,market,industry,list_date")
-    if df is None or df.empty:
-        raise HTTPException(502, "Tushare stock_basic 未返回股票列表。")
-    # 本版扫描沪深京A股；排除B股及风险警示股。
-    df = df[df["ts_code"].str.endswith((".SH", ".SZ", ".BJ"))].copy()
-    df = df[~df["name"].fillna("").str.contains(r"ST|退", case=False, regex=True)]
-    return df
+    # stock_basic is not included in the 120-point daily-only tier.
+    # Build the universe from cached daily bars; use code as a safe display-name fallback.
+    with _db() as con:
+        rows = con.execute("SELECT DISTINCT ts_code FROM daily").fetchall()
+    codes = [r["ts_code"] for r in rows if str(r["ts_code"]).endswith((".SH", ".SZ", ".BJ"))]
+    if not codes:
+        raise HTTPException(409, "行情缓存中没有股票代码，请先完成历史行情初始化。")
+    return pd.DataFrame([{"ts_code": code, "name": code.split(".")[0],
+                          "industry": "", "market": code.split(".")[-1]} for code in codes])
 
 
 @router.get("/api/screener/status")
