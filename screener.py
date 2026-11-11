@@ -197,15 +197,8 @@ def screener_backfill(body: dict):
             if d is None or d.empty:
                 errors.append({"date": day, "error": "daily无数据"})
                 continue
-            b = None
-            try:
-                b = _query_all(pro, "daily_basic", trade_date=day,
-                    fields="ts_code,trade_date,turnover_rate,volume_ratio,pe_ttm,pb,total_mv,circ_mv")
-                if b is not None and not b.empty:
-                    daily_basic_ok += 1
-                    d = d.merge(b.drop(columns=["trade_date"], errors="ignore"), on="ts_code", how="left")
-            except Exception as e:
-                errors.append({"date": day, "warning": "daily_basic不可用，估值/换手字段留空", "detail": str(e)[:180]})
+            # 120-point tier does not include daily_basic. Skip it rather than
+            # issuing a permission-failing request for every historical trading day.
             for col in ("turnover_rate", "volume_ratio", "pe_ttm", "pb", "total_mv", "circ_mv"):
                 if col not in d.columns:
                     d[col] = np.nan
