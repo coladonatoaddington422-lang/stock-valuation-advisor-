@@ -53,7 +53,13 @@ class _DBConnection:
         return self.raw.execute(self._sql(sql), params)
 
     def executemany(self, sql, params):
-        return self.raw.executemany(self._sql(sql), params)
+        sql = self._sql(sql)
+        if self.postgres:
+            # psycopg 3 Connection has no executemany(); it belongs to Cursor.
+            with self.raw.cursor() as cur:
+                cur.executemany(sql, params)
+                return cur
+        return self.raw.executemany(sql, params)
 
 
 @contextmanager
