@@ -463,8 +463,15 @@ def _cached_universe(min_rows=500):
     return latest_date, codes, recent, recent_dates
 
 
-def _load_stock(code):
-    return _read_df("SELECT * FROM daily WHERE ts_code=? ORDER BY trade_date", (code,))
+def _load_stocks_batch(codes):
+    """Load a bounded batch of symbols with one Neon connection instead of one per stock."""
+    if not codes:
+        return pd.DataFrame()
+    marks = ",".join("?" for _ in codes)
+    return _read_df(
+        f"SELECT * FROM daily WHERE ts_code IN ({marks}) ORDER BY ts_code, trade_date",
+        tuple(codes)
+    )
 
 
 @router.post("/api/screener/scan")
@@ -484,20 +491,26 @@ def screener_scan(body: dict = {}):
             returns = rr.replace([np.inf, -np.inf], np.nan).dropna().tolist()
     market_ret = float(np.mean(returns)) if returns else None
     rows = []
-    for code in codes:
-        g = _load_stock(code)
-        if g.empty or str(g["trade_date"].iloc[-1]) != str(latest_date):
+    # 100 symbols per query: bounded memory, far fewer Neon connections.
+    for offset in range(0, len(codes), 100):
+        batch_codes = codes[offset:offset + 100]
+        batch_df = _load_stocks_batch(batch_codes)
+        if batch_df.empty:
             continue
-        try:
-            result = _score_one(g, market_ret)
-            if result is None: continue
-            info = meta.loc[code]
-            result.update({"ts_code": code, "name": str(info["name"]),
-                           "industry": "" if pd.isna(info.get("industry")) else str(info.get("industry")),
-                           "market": "" if pd.isna(info.get("market")) else str(info.get("market"))})
-            rows.append(result)
-        except Exception:
-            continue
+        for code, g in batch_df.groupby("ts_code", sort=False):
+            g = g.sort_values("trade_date").reset_index(drop=True)
+            if g.empty or str(g["trade_date"].iloc[-1]) != str(latest_date):
+                continue
+            try:
+                result = _score_one(g, market_ret)
+                if result is None: continue
+                info = meta.loc[code]
+                result.update({"ts_code": code, "name": str(info["name"]),
+                               "industry": "" if pd.isna(info.get("industry")) else str(info.get("industry")),
+                               "market": "" if pd.isna(info.get("market")) else str(info.get("market"))})
+                rows.append(result)
+            except Exception:
+                continue
     rows.sort(key=lambda z: (z["score"], z["formula_signal"], z["ret20"] if z["ret20"] is not None else -999), reverse=True)
     min_score = max(0, min(int(body.get("min_score", 70)), 100))
     candidates = [x for x in rows if x["score"] >= min_score and (x["formula_recent"] or x["stage"] == "突破确认")]
