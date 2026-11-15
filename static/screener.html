@@ -15,7 +15,23 @@
 <script>
 const $=id=>document.getElementById(id);let latest=null;
 const fmt=(v,n=2)=>v==null||!Number.isFinite(Number(v))?'--':Number(v).toFixed(n);
-async function api(url,body){let r=await fetch(url,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});let d=await r.json();if(!r.ok)throw Error(d.detail||d.message||'请求失败');return d}
+async function api(url,body){
+ const r=await fetch(url,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
+ const raw=await r.text();
+ const ct=(r.headers.get('content-type')||'').toLowerCase();
+ let d=null;
+ if(raw){
+  try{d=JSON.parse(raw)}catch(_){
+   const preview=raw.replace(/<[^>]*>/g,' ').replace(/\\s+/g,' ').trim().slice(0,180);
+   if(!r.ok) throw Error('服务器返回非JSON错误页面（HTTP '+r.status+'）。可能是扫描超时或服务重启。'+(preview?' 提示：'+preview:''));
+   throw Error('服务器返回了非JSON内容，HTTP '+r.status+'，类型：'+(ct||'未知')+'。请稍后重试；若扫描时出现，通常是请求超时或服务重启。');
+  }
+ }else{
+  throw Error('服务器返回空响应（HTTP '+r.status+'）。可能是扫描超时或服务重启，请稍后重试。');
+ }
+ if(!r.ok)throw Error((d&& (d.detail||d.message))||('请求失败，HTTP '+r.status));
+ return d;
+}
 async function status(){try{let d=await api('/api/screener/status');$('initStatus').innerHTML='Token：'+(d.token_configured?'已配置':'<b class="error">未配置</b>')+'<br>已缓存交易日：'+d.cached_trade_dates+' / 750<br>最新行情日期：'+(d.latest_trade_date||'暂无')+'<br>缓存股票数：'+d.cached_stocks+'<br><span class="muted">'+d.note+'</span>'}catch(e){$('initStatus').textContent=e.message}}
 $('statusBtn').onclick=status;
 
