@@ -278,7 +278,9 @@ def _sma_tdx(s: pd.Series, n: int, m: int) -> pd.Series:
 
 def calc_original_formula(df: pd.DataFrame) -> pd.DataFrame:
     """Translate the supplied Tongdaxin formula, retaining the current-bar LLV condition."""
-    x = df.sort_values("trade_date").copy()
+    # SQL batch reads are already ordered by symbol and trade date.
+    # Avoid sorting each of ~5,600 individual histories again.
+    x = df.copy() if df["trade_date"].is_monotonic_increasing else df.sort_values("trade_date").copy()
     h, l, c = x["high"].astype(float), x["low"].astype(float), x["close"].astype(float)
     v1 = _ema(h.rolling(500, min_periods=500).max(), 21)
     v2 = _ema(h.rolling(250, min_periods=250).max(), 21)
@@ -464,12 +466,15 @@ def _cached_universe(min_rows=500):
 
 
 def _load_stocks_batch(codes):
-    """Load a bounded batch of symbols with one Neon connection instead of one per stock."""
+    """Load a larger bounded batch with only the columns required by scoring."""
     if not codes:
         return pd.DataFrame()
     marks = ",".join("?" for _ in codes)
     return _read_df(
-        f"SELECT * FROM daily WHERE ts_code IN ({marks}) ORDER BY ts_code, trade_date",
+        f"""SELECT ts_code,trade_date,open,high,low,close,pre_close,pct_chg,
+                   vol,amount,turnover_rate,pe_ttm,pb,total_mv
+            FROM daily WHERE ts_code IN ({marks})
+            ORDER BY ts_code, trade_date""",
         tuple(codes)
     )
 
@@ -491,9 +496,10 @@ def screener_scan(body: dict = {}):
             returns = rr.replace([np.inf, -np.inf], np.nan).dropna().tolist()
     market_ret = float(np.mean(returns)) if returns else None
     rows = []
-    # 100 symbols per query: bounded memory, far fewer Neon connections.
-    for offset in range(0, len(codes), 100):
-        batch_codes = codes[offset:offset + 100]
+    # 500 symbols per query: reduce database round trips while keeping each
+    # result batch bounded for the free web instance.
+    for offset in range(0, len(codes), 500):
+        batch_codes = codes[offset:offset + 500]
         batch_df = _load_stocks_batch(batch_codes)
         if batch_df.empty:
             continue
